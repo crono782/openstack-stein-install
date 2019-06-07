@@ -1,0 +1,685 @@
+#############################################################
+###### OPENSTACK STEIN RELEASE MULTI-NODE INTSALLATION ######
+#############################################################
+# Author: Daniel Queen
+# URL: http://www.learnoss.com
+# Date: 06/05/19
+#############################################################
+# NETWORKS:
+#   - Mangement Network: 10.10.10.0/24 (default route, NAT)
+#   - Tenant (Overlay) Network: 10.10.20.0/24
+#   - Provider Network: 203.0.13.0/24
+#   - DBaaS Network: 172.16.0.0/24
+# HOSTS: CentOS 7 minimal:
+# controller:
+#   - networks: management
+#   - ips: 10.10.10.51
+# compute:
+#   - networks: management, tenant, provider, dbaas
+#   - ips: 10.10.10.52, 10.10.20.52, (none), (none)
+#   - cpu: vmx extensions (nested virtualization or native)
+# network:
+#   - networks: management, tenant, provider, dbaas
+#   - ips: 10.10.10.53, 10.10.20.53, (none), (none)
+# block:
+#   - networks: management
+#   - ips: 10.10.10.54
+#   - disks: 4 extra disks (block storage)
+# object:
+#   - networks: management
+#   - ips: 10.10.10.55
+#   - disks: 3 extra disks (object storage)
+# dbaas:
+#   - networks: managememt, dbaas
+#   - ips: 10.10.10.56, 172.16.0.2
+#############################################################
+#############################################################
+
+#######################
+# - PART 0: SYSTEM PREP
+#######################
+
+#-------------
+# => all nodes
+#-------------
+
+# set hostname
+
+hostnamectl set-hostname <hostname>
+
+# set up networks/ips
+# use whatever method you like, but make sure they persist reboot
+
+# stop services we don't want
+
+for i in stop disable;do systemctl $i firewalld NetworkManager;done
+
+# set host entries in lieu of DNS
+
+cat << EOF >> /etc/hosts
+10.10.10.51 controller
+10.10.10.52 compute
+10.10.10.53 network
+10.10.10.54 block
+10.10.10.55 object
+10.10.10.56 dbaas
+EOF
+
+# set up NTP
+
+if [ "$(hostname)" == "controller" ]; then
+  sed -i 's/^#allow.*/allow 10.10.10.0/24' /etc/chrony.conf
+else
+  sed -i -e '/^server 0/i server controller iburst' -e '/^server [0-9]/d' /etc/chrony.conf
+fi
+
+systemctl restart chronyd
+
+# install base openstack packages
+
+yum -y install centos-release-openstack-stein
+yum -y update
+yum -y install python-openstackclient openstack-selinux
+
+# create some helper scripts
+
+# backs up conf files and removes comments for a clean slate
+
+cat << EOF > bak.sh
+#!/bin/sh
+filepath=\$1
+cp \$filepath \$filepath.bak
+grep '^[^#$]' \$filepath.bak > \$filepath
+EOF
+
+chmod +x bak.sh
+
+# helper for adding key/value pairs and sections to conf file
+
+cat << EOF > conf.sh
+#!/bin/bash
+file=\$1
+section=\$2
+key=\$3
+shift;shift;shift
+value="\$@"
+if [ "\$(grep -c "^\[\$section\]" \$file)" -lt 1  ]; then
+  echo [\$section] >> \$file
+fi
+if [ ! -z "\$(sed -n "/\[\$section\]/,/\[/{/^\$key =.*/=}" \$file)" ]; then
+  sed -i "/\[\$section\]/,/\[/{s/\$key[ =].*/\$key = \$value/}" \$file
+else
+  sed -i "/^\[\$section\]/a \$key = \$value" \$file
+fi
+EOF
+
+chmod +x conf.sh
+
+# reboot node so any kernel updates and name change take full effect
+
+reboot now
+
+###########################
+# - PART 1: CONTROLLER PREP
+###########################
+
+#-------------------
+# => controller node
+#-------------------
+
+# make some controller specific helper scripts
+
+# script for adding service endpoints
+
+cat << EOF > endpoint.sh
+#!/bin/bash
+eptype=\$1
+epport=\$2
+ephost=\${3:-controller}
+for i in public internal admin; do openstack endpoint create --region RegionOne \$eptype \$i http://\$ephost:$epport;done
+EOF
+
+chmod +x endpoint.sh
+
+# script for creating mysql project dbs
+
+cat << EOF > dbcreate.sh
+#!/bin/bash
+dbname=\$1
+dbuser=\$2
+pass=\$3
+cat << EOS > ~/.sqlfiles/\$dbname-\$dbuser.sql
+CREATE DATABASE \$dbname;
+GRANT ALL PRIVILEGES ON \$dbname.* TO '\$dbuser'@'localhost' IDENTIFIED BY '\$pass';
+GRANT ALL PRIVILEGES ON \$dbname.* TO '\$dbuser'@'%' IDENTIFIED BY '\$pass';
+EOS
+mysql -u root -ppassword < ~/.sqlfiles/\$dbname-\$dbuser.sql
+EOF
+
+chmod +x dbcreate.sh
+
+# create basic rc files
+
+# rc file for admin user
+
+cat << EOF > adminrc
+black=\$(tput setaf 0)
+red=\$(tput setaf 1)
+green=\$(tput setaf 2)
+yellow=\$(tput setaf 3)
+blue=\$(tput setaf 4)
+magenta=\$(tput setaf 5)
+cyan=\$(tput setaf 6)
+white=\$(tput setaf 7)
+reset=\$(tput sgr0)
+export OS_PROJECT_DOMAIN_NAME=Default
+export OS_USER_DOMAIN_NAME=Default
+export OS_PROJECT_NAME=admin
+export OS_USERNAME=admin
+export OS_PASSWORD=password
+export OS_AUTH_URL=http://controller:5000/v3
+export OS_IDENTITY_API_VERSION=3
+export OS_IMAGE_API_VERSION=2
+export PS1='[\u@\h \[\$red\](\$OS_USERNAME:\$OS_PROJECT_NAME)\[\$reset\] \W]\$ '
+EOF
+
+# rc file to reset settings
+
+cat << EOF > norc
+unset OS_PROJECT_DOMAIN_NAME
+unset OS_USER_DOMAIN_NAME
+unset OS_PROJECT_NAME
+unset OS_USERNAME
+unset OS_PASSWORD
+unset OS_AUTH_URL
+unset OS_IDENTITY_API_VERSION
+unset OS_IMAGE_API_VERSION
+export PS1='[\u@\h \W]\$ '
+EOF
+
+# set up SSH keys for convenience
+
+ssh-keygen -t rsa -N '' -f ~/.ssh/id_rsa
+
+for i in controller compute network block object dbaas;do ssh-copy-id -o StrictHostKeyChecking=no $i;done
+
+# install/setup mysql database
+
+yum -y install mariadb mariadb-server python2-PyMySQL
+
+cat << EOF > /etc/my.cnf.d/openstack.cnf
+[mysqld]
+bind-address = 10.10.10.51
+default-storage-engine = innodb
+innodb_file_per_table = on
+max_connections = 4096
+collation-server = utf8_general_ci
+character-set-server = utf8
+EOF
+
+for i in enable start;do systemctl $i mariadb;done
+
+# manual mysql setup (not using this currently)
+
+#mysql_secure_installation
+
+# auto mysql setup (using this instead)
+
+mysql -e "UPDATE mysql.user SET Password = PASSWORD('password') WHERE User = 'root'"
+mysql -e "DROP USER ''@'localhost'"
+mysql -e "DROP USER ''@'$(hostname)'"
+mysql -e "DROP DATABASE test"
+mysql -e "FLUSH PRIVILEGES"
+
+mkdir ~/.sqlfiles # << for dbcreate script usage
+
+# install/stup message queue
+
+yum -y install rabbitmq-server
+
+for i in enable start;do systemctl $i rabbitmq-server;done
+
+rabbitmqctl add_user openstack password
+
+rabbitmqctl set_permissions openstack ".*" ".*" ".*"
+
+# install/setup memcached
+
+yum -y install memcached python-memcached
+
+sed -i 's/OPTIONS="-l 127.0.0.1,::1"/OPTIONS="-l 127.0.0.1,::1,controller"/' /etc/sysconfig/memcached
+
+for i in enable start;do systemctl $i memcached;done
+
+# install/setup etcd
+
+yum -y install etcd
+
+sed -r -e '/(ETCD_LISTEN|ETCD_INITIAL)/ s/^#//' -e 's/localhost/10.10.10.51/g' -e '/(ETCD_NAME|ETCD_INITIAL)/ s/default/controller/' -e 's/(etcd-cluster)/\1-01/' /etc/etcd/etcd.conf
+
+for i in enable start;do systemctl $i etcd;done
+
+#################################
+# - PART 2: KEYSTONE INSTALLATION
+#################################
+
+#-------------------
+# => controller node
+#-------------------
+
+# create keystone database
+
+./dbcreate.sh keystone keystone password
+
+# install packages
+
+yum -y install openstack-keystone httpd mod_wsgi
+
+# conf file work
+./bak.sh /etc/keystone/keystone.conf
+
+./conf.sh /etc/keystone/keystone.conf database connection mysql+pymysql://keystone:password@controller/keystone
+./conf.sh /etc/keystone/keystone.conf token provider fernet
+
+# sync database
+
+su -s /bin/sh -c "keystone-manage db_sync" keystone
+
+# initialize fernet
+
+keystone-manage fernet_setup --keystone-user keystone --keystone-group keystone
+
+keystone-manage credential_setup --keystone-user keystone --keystone-group keystone
+
+# bootstrap keystone
+
+keystone-manage bootstrap --bootstrap-password password \
+  --bootstrap-admin-url http://controller:5000/v3/ \
+  --bootstrap-internal-url http://controller:5000/v3/ \
+  --bootstrap-public-url http://controller:5000/v3/ \
+  --bootstrap-region-id RegionOne
+
+# setup/initialize apache/wsgi
+sed -i 's/^#ServerName.*/ServerName controller/' /etc/httpd/conf/httpd.conf
+
+ln -s /usr/share/keystone/wsgi-keystone.conf /etc/httpd/conf.d/
+
+for i in enable start;do systemctl $i httpd;done
+
+# create basic projects and roles
+
+source ~/adminrc
+
+openstack project create --domain default --description "Service Project" service
+
+openstack project create --domain default --description "Learnoss Project" learnoss
+
+openstack user create --domain default --password password dqueen
+
+if [ "$(openstack role list -c Name -f value|grep -c '^member$')" > 0 ]; then openstack role create member;fi
+
+openstack role add --project learnoss --user dqueen member
+
+###############################
+# - PART 3: GLANCE INSTALLATION
+###############################
+
+#-------------------
+# => controller node
+#-------------------
+
+# create glance database
+
+./dbcreate.sh glance glance password
+
+# create user, add role, create service, create endpoints
+
+source ~/adminrc
+
+openstack user create --domain default --password password glance
+
+openstack role add --project service --user glance admin
+
+openstack service create --name glance --description "OpenStack Image" image
+
+./endpoint.sh image 9292
+
+# install packages
+
+yum -y install openstack-glance
+
+# conf file work
+
+./bak.sh /etc/glance/glance-api.conf
+
+./conf.sh /etc/glance/glance-api.conf database connection mysql+pymysql://glance:password@controller/glance
+./conf.sh /etc/glance/glance-api.conf keystone_authtoken www_authenticate_uri http://controller:5000
+./conf.sh /etc/glance/glance-api.conf keystone_authtoken auth_url http://controller:5000
+./conf.sh /etc/glance/glance-api.conf keystone_authtoken memcached_servers controller:11211
+./conf.sh /etc/glance/glance-api.conf keystone_authtoken auth_type password
+./conf.sh /etc/glance/glance-api.conf keystone_authtoken project_domain_name Default
+./conf.sh /etc/glance/glance-api.conf keystone_authtoken user_domain_name Default
+./conf.sh /etc/glance/glance-api.conf keystone_authtoken project_name service
+./conf.sh /etc/glance/glance-api.conf keystone_authtoken username glance
+./conf.sh /etc/glance/glance-api.conf keystone_authtoken password password
+./conf.sh /etc/glance/glance-api.conf glance_store stores file,http
+./conf.sh /etc/glance/glance-api.conf glance_store default_store file
+./conf.sh /etc/glance/glance-api.conf glance_store filesystem_store_datadir /var/lib/glance/images/
+./conf.sh /etc/glance/glance-api.conf paste_deploy flavor keystone
+
+./bak.sh /etc/glance/glance-registry.conf
+
+./conf.sh /etc/glance/glance-api.conf database connection mysql+pymysql://glance:password@controller/glance
+./conf.sh /etc/glance/glance-api.conf keystone_authtoken www_authenticate_uri http://controller:5000
+./conf.sh /etc/glance/glance-api.conf keystone_authtoken auth_url http://controller:5000
+./conf.sh /etc/glance/glance-api.conf keystone_authtoken memcached_servers controller:11211
+./conf.sh /etc/glance/glance-api.conf keystone_authtoken auth_type password
+./conf.sh /etc/glance/glance-api.conf keystone_authtoken project_domain_name Default
+./conf.sh /etc/glance/glance-api.conf keystone_authtoken user_domain_name Default
+./conf.sh /etc/glance/glance-api.conf keystone_authtoken project_name service
+./conf.sh /etc/glance/glance-api.conf keystone_authtoken username glance
+./conf.sh /etc/glance/glance-api.conf keystone_authtoken password password
+./conf.sh /etc/glance/glance-api.conf paste_deploy flavor keystone
+
+# sync database and start services
+
+su -s /bin/sh -c "glance-manage db_sync" glance
+
+for i in enable start;do systemctl $i openstack-glance-{api,registry};done
+
+# download cirros test image and upload to glance for verification
+
+yum -y install wget
+
+wget http://download.cirros-cloud.net/0.4.0/cirros-0.4.0-x86_64-disk.img
+
+openstack image create "cirros" --file cirros-0.4.0-x86_64-disk.img --disk-format qcow2 --container-format bare --public
+
+##################################
+# - PART 4: PLACEMENT INSTALLATION
+##################################
+
+### NOTE #########################################################
+# The placement service was split from nova in the Stein release
+# It is now its own service with its own config files and services
+##################################################################
+
+#-------------------
+# => controller node
+#-------------------
+
+# create placement database
+
+./dbcreate.sh placement placement password
+
+# create user, add role, create service and endpoints
+
+openstack user create --domain default --password password placement
+
+openstack role add --project service --user placement admin
+
+openstack service create --name placement --description "Placement API" placement
+
+./endpoint.sh placement 8778
+
+# install packages
+
+yum -y install openstack-placement-api
+
+# conf file work
+
+./bak.sh /etc/placement/placement.conf
+
+./conf.sh /etc/placement/placement.conf api auth_strategy keystone
+./conf.sh /etc/placement/placement.conf placement_database connection mysql+pymysql://placement:password@controller/placement
+./conf.sh /etc/placement/placement.conf keystone_authtoken auth_url http://controller:5000/v3
+./conf.sh /etc/placement/placement.conf keystone_authtoken memcached_servers controller:11211
+./conf.sh /etc/placement/placement.conf keystone_authtoken auth_type password
+./conf.sh /etc/placement/placement.conf keystone_authtoken project_domain_name Default
+./conf.sh /etc/placement/placement.conf keystone_authtoken user_domain_name Default
+./conf.sh /etc/placement/placement.conf keystone_authtoken project_name service
+./conf.sh /etc/placement/placement.conf keystone_authtoken username placement
+./conf.sh /etc/placement/placement.conf keystone_authtoken password password
+
+# add config to apache conf. packaging bug still misses this part
+
+cat << EOF >> /etc/httpd/conf.d/00-placement-api.conf
+<Directory /usr/bin>
+    <IfVersion >= 2.4>
+        Require all granted
+    </IfVersion>
+    <IfVersion < 2.4>
+        Order allow,deny
+        Allow from all
+    </IfVersion>
+</Directory>
+EOF
+
+# sync database and restart apache
+
+su -s /bin/sh -c "placement-manage db sync" placement
+
+systemctl restart httpd
+
+# some verification tests
+
+openstack --os-placement-api-version 1.2 resource class list --sort-column name
+openstack --os-placement-api-version 1.6 trait list --sort-column name
+
+#############################
+# - PART 5: NOVA INSTALLATION
+#############################
+
+#-------------------
+# => controller node
+#-------------------
+
+# create nova databases
+
+./dbcreate.sh nova_api nova password
+./dbcreate.sh nova nova password
+./dbcreate.sh nova_cell0 nova password
+
+# create user, add role, create service and endpoints
+
+source ~/adminrc
+
+openstack user create --domain default --password password nova
+
+openstack role add --project service --user nova admin
+
+openstack service create --name nova --description "OpenStack Compute" compute
+
+./endpoint.sh compute 8774/v2.1
+
+# install packages
+
+yum -y install openstack-nova-api openstack-nova-conductor openstack-nova-novncproxy openstack-nova-scheduler
+
+# conf file work
+
+./bak.sh /etc/nova/nova.conf
+
+sed -i -e '/\[DEFAULT\]/a \
+enabled_apis = osapi_compute,metadata\
+my_ip = 10.10.10.51\
+use_neutron = true\
+firewall_driver = nova.virt.firewall.NoopFirewallDriver\
+transport_url = rabbit://openstack:password@controller' \
+ -e '/\[api\]/a auth_strategy = keystone' \
+ -e '/\[api_database\]/a connection = mysql+pymysql://nova:password@controller/nova_api' \
+ -e '/\[database\]/a connection = mysql+pymysql://nova:password@controller/nova' \
+ -e '/\[glance\]/a api_servers = http://controller:9292' \
+ -e '/\[keystone_authtoken\]/a \
+auth_url = http://controller:5000/v3\
+memcached_servers = controller:11211\
+auth_type = password\
+project_domain_name = Default\
+user_domain_name = Default\
+project_name = service\
+username = nova\
+password = password' \
+ -e '/\[oslo_concurrency\]/a lock_path = /var/lib/nova/tmp' \
+ -e '/\[placement\]/a \
+region_name = RegionOne\
+project_domain_name = Default\
+project_name = service\
+auth_type = password\
+user_domain_name = Default\
+auth_url = http://controller:5000/v3\
+username = placement\
+password = password' \
+ -e '/\[vnc\]/a \
+enabled = true\
+server_listen = $my_ip\
+server_proxyclient_address = $my_ip' \
+/etc/nova/nova.conf
+
+su -s /bin/sh -c "nova-manage api_db sync" nova
+
+su -s /bin/sh -c "nova-manage cell_v2 map_cell0" nova
+
+su -s /bin/sh -c "nova-manage cell_v2 create_cell --name=cell1 --verbose" nova
+
+su -s /bin/sh -c "nova-manage db sync" nova
+
+su -s /bin/sh -c "nova-manage cell_v2 list_cells" nova
+
+for i in enable start;do systemctl $i openstack-nova-{api,scheduler,conductor,novncproxy};done
+
+#----------------
+# => compute node
+#----------------
+
+yum -y install openstack-nova-compute
+
+./bak.sh /etc/nova/nova.conf
+
+sed -i -e '/\[DEFAULT\]/a \
+enabled_apis = osapi_compute,metadata\
+my_ip = 10.10.10.52\
+use_neutron = true\
+firewall_driver = nova.virt.firewall.NoopFirewallDriver\
+transport_url = rabbit://openstack:password@controller' \
+ -e '/\[api\]/a auth_strategy = keystone' \
+ -e '/\[glance\]/a api_servers = http://controller:9292' \
+ -e '/\[keystone_authtoken\]/a \
+auth_url = http://controller:5000/v3\
+memcached_servers = controller:11211\
+auth_type = password\
+project_domain_name = Default\
+user_domain_name = Default\
+project_name = service\
+username = nova\
+password = password' \
+ -e '/\[oslo_concurrency\]/a lock_path = /var/lib/nova/tmp' \
+ -e '/\[placement\]/a \
+region_name = RegionOne\
+project_domain_name = Default\
+project_name = service\
+auth_type = password\
+user_domain_name = Default\
+auth_url = http://controller:5000/v3\
+username = placement\
+password = password' \
+ -e '/\[vnc\]/a \
+enabled = true\
+server_listen = 0.0.0.0\
+server_proxyclient_address = $my_ip\
+novncproxy_base_url = http://controller:6080/vnc_auto.html' \
+/etc/nova/nova.conf
+
+for i in enable start;do systemctl $i libvirtd openstack-nova-compute;done
+
+#-------------------
+# => controller node
+#-------------------
+
+source ~/adminrc
+
+openstack compute service list --service nova-compute
+
+su -s /bin/sh -c "nova-manage cell_v2 discover_hosts --verbose" nova
+
+# verifications
+
+openstack compute service list
+
+openstack catalog list
+
+openstack image list
+
+nova-status upgrade check
+
+################################
+# - PART 5: NEUTRON INSTALLATION
+################################
+
+#-------------------
+# => controller node
+#-------------------
+
+./dbcreate.sh neutron neutron password
+
+source ~/adminrc
+
+openstack user create --domain default --password password neutron
+
+openstack role add --project service --user neutron admin
+
+openstack service create --name neutron --description "OpenStack Networking" network
+
+./endpoint.sh network 9696
+
+yum -y install openstack-neutron
+
+./bak.sh /etc/neutron/neutron.conf
+
+./conf.sh /etc/neutron/neutron.conf database connection mysql+pymysql://neutron:password@controller/neutron
+
+./conf.sh /etc/neutron/neutron.conf DEFAULT core_plugin ml2
+./conf.sh /etc/neutron/neutron.conf DEFAULT service_plugins router
+./conf.sh /etc/neutron/neutron.conf DEFAULT allow_overlapping_ips true
+./conf.sh /etc/neutron/neutron.conf DEFAULT transport_url rabbit://openstack:RABBIT_PASS@controller
+./conf.sh /etc/neutron/neutron.conf DEFAULT auth_strategy keystone
+./conf.sh /etc/neutron/neutron.conf DEFAULT notify_nova_on_port_status_changes true
+./conf.sh /etc/neutron/neutron.conf DEFAULT notify_nova_on_port_data_changes true
+
+./conf.sh /etc/neutron/neutron.conf keystone_authtoken www_authenticate_uri http://controller:5000
+./conf.sh /etc/neutron/neutron.conf keystone_authtoken auth_url http://controller:5000
+./conf.sh /etc/neutron/neutron.conf keystone_authtoken memcached_servers controller:11211
+./conf.sh /etc/neutron/neutron.conf keystone_authtoken auth_type password
+./conf.sh /etc/neutron/neutron.conf keystone_authtoken project_domain_name default
+./conf.sh /etc/neutron/neutron.conf keystone_authtoken user_domain_name default
+./conf.sh /etc/neutron/neutron.conf keystone_authtoken project_name service
+./conf.sh /etc/neutron/neutron.conf keystone_authtoken username neutron
+./conf.sh /etc/neutron/neutron.conf keystone_authtoken password password
+
+./conf.sh /etc/neutron/neutron.conf nova auth_url http://controller:5000
+./conf.sh /etc/neutron/neutron.conf nova auth_type password
+./conf.sh /etc/neutron/neutron.conf nova project_domain_name default
+./conf.sh /etc/neutron/neutron.conf nova user_domain_name default
+./conf.sh /etc/neutron/neutron.conf nova region_name RegionOne
+./conf.sh /etc/neutron/neutron.conf nova project_name service
+./conf.sh /etc/neutron/neutron.conf nova username nova
+./conf.sh /etc/neutron/neutron.conf nova password password
+
+./conf.sh /etc/neutron/neutron.conf oslo_concurrency lock_path /var/lib/neutron/tmp
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
