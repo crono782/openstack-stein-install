@@ -500,40 +500,38 @@ yum -y install openstack-nova-api openstack-nova-conductor openstack-nova-novncp
 
 ./bak.sh /etc/nova/nova.conf
 
-sed -i -e '/\[DEFAULT\]/a \
-enabled_apis = osapi_compute,metadata\
-my_ip = 10.10.10.51\
-use_neutron = true\
-firewall_driver = nova.virt.firewall.NoopFirewallDriver\
-transport_url = rabbit://openstack:password@controller' \
- -e '/\[api\]/a auth_strategy = keystone' \
- -e '/\[api_database\]/a connection = mysql+pymysql://nova:password@controller/nova_api' \
- -e '/\[database\]/a connection = mysql+pymysql://nova:password@controller/nova' \
- -e '/\[glance\]/a api_servers = http://controller:9292' \
- -e '/\[keystone_authtoken\]/a \
-auth_url = http://controller:5000/v3\
-memcached_servers = controller:11211\
-auth_type = password\
-project_domain_name = Default\
-user_domain_name = Default\
-project_name = service\
-username = nova\
-password = password' \
- -e '/\[oslo_concurrency\]/a lock_path = /var/lib/nova/tmp' \
- -e '/\[placement\]/a \
-region_name = RegionOne\
-project_domain_name = Default\
-project_name = service\
-auth_type = password\
-user_domain_name = Default\
-auth_url = http://controller:5000/v3\
-username = placement\
-password = password' \
- -e '/\[vnc\]/a \
-enabled = true\
-server_listen = $my_ip\
-server_proxyclient_address = $my_ip' \
-/etc/nova/nova.conf
+./conf.sh /etc/nova/nova.conf DEFAULT enabled_apis osapi_compute,metadata
+./conf.sh /etc/nova/nova.conf DEFAULT my_ip 10.10.10.51
+./conf.sh /etc/nova/nova.conf DEFAULT use_neutron true
+./conf.sh /etc/nova/nova.conf DEFAULT firewall_driver nova.virt.firewall.NoopFirewallDriver
+./conf.sh /etc/nova/nova.conf DEFAULT transport_url rabbit://openstack:password@controller
+./conf.sh /etc/nova/nova.conf api auth_strategy keystone
+./conf.sh /etc/nova/nova.conf api_database connection mysql+pymysql://nova:password@controller/nova_api
+./conf.sh /etc/nova/nova.conf database connection mysql+pymysql://nova:password@controller/nova
+./conf.sh /etc/nova/nova.conf glance api_servers http://controller:9292
+./conf.sh /etc/nova/nova.conf keystone_authtoken auth_url http://controller:5000/v3
+./conf.sh /etc/nova/nova.conf keystone_authtoken memcached_servers controller:11211
+./conf.sh /etc/nova/nova.conf keystone_authtoken auth_type password
+./conf.sh /etc/nova/nova.conf keystone_authtoken project_domain_name Default
+./conf.sh /etc/nova/nova.conf keystone_authtoken user_domain_name Default
+./conf.sh /etc/nova/nova.conf keystone_authtoken project_name service
+./conf.sh /etc/nova/nova.conf keystone_authtoken username nova
+./conf.sh /etc/nova/nova.conf keystone_authtoken password password
+./conf.sh /etc/nova/nova.conf oslo_concurrency lock_path /var/lib/nova/tmp
+./conf.sh /etc/nova/nova.conf placement region_name = RegionOne
+./conf.sh /etc/nova/nova.conf placement project_domain_name Default
+./conf.sh /etc/nova/nova.conf placement project_name service
+./conf.sh /etc/nova/nova.conf placement auth_type password
+./conf.sh /etc/nova/nova.conf placement user_domain_name Default
+./conf.sh /etc/nova/nova.conf placement auth_url http://controller:5000/v3
+./conf.sh /etc/nova/nova.conf placement username placement
+./conf.sh /etc/nova/nova.conf placement password password
+./conf.sh /etc/nova/nova.conf vnc enabled true
+# single quote '$my_ip' so bash doesn't try to interpret it
+./conf.sh /etc/nova/nova.conf vnc server_listen '$my_ip'
+./conf.sh /etc/nova/nova.conf vnc server_proxyclient_address '$my_ip'
+
+# sync/build databases and start services
 
 su -s /bin/sh -c "nova-manage api_db sync" nova
 
@@ -551,43 +549,45 @@ for i in enable start;do systemctl $i openstack-nova-{api,scheduler,conductor,no
 # => compute node
 #----------------
 
+# install packages
+
 yum -y install openstack-nova-compute
+
+# conf file work
 
 ./bak.sh /etc/nova/nova.conf
 
-sed -i -e '/\[DEFAULT\]/a \
-enabled_apis = osapi_compute,metadata\
-my_ip = 10.10.10.52\
-use_neutron = true\
-firewall_driver = nova.virt.firewall.NoopFirewallDriver\
-transport_url = rabbit://openstack:password@controller' \
- -e '/\[api\]/a auth_strategy = keystone' \
- -e '/\[glance\]/a api_servers = http://controller:9292' \
- -e '/\[keystone_authtoken\]/a \
-auth_url = http://controller:5000/v3\
-memcached_servers = controller:11211\
-auth_type = password\
-project_domain_name = Default\
-user_domain_name = Default\
-project_name = service\
-username = nova\
-password = password' \
- -e '/\[oslo_concurrency\]/a lock_path = /var/lib/nova/tmp' \
- -e '/\[placement\]/a \
-region_name = RegionOne\
-project_domain_name = Default\
-project_name = service\
-auth_type = password\
-user_domain_name = Default\
-auth_url = http://controller:5000/v3\
-username = placement\
-password = password' \
- -e '/\[vnc\]/a \
-enabled = true\
-server_listen = 0.0.0.0\
-server_proxyclient_address = $my_ip\
-novncproxy_base_url = http://controller:6080/vnc_auto.html' \
-/etc/nova/nova.conf
+./conf.sh /etc/nova/nova.conf DEFAULT enabled_apis osapi_compute,metadata
+./conf.sh /etc/nova/nova.conf DEFAULT my_ip 10.10.10.52
+./conf.sh /etc/nova/nova.conf DEFAULT use_neutron true
+./conf.sh /etc/nova/nova.conf DEFAULT firewall_driver nova.virt.firewall.NoopFirewallDriver
+./conf.sh /etc/nova/nova.conf DEFAULT transport_url rabbit://openstack:password@controller
+./conf.sh /etc/nova/nova.conf api auth_strategy keystone
+./conf.sh /etc/nova/nova.conf glance api_servers http://controller:9292
+./conf.sh /etc/nova/nova.conf keystone_authtoken auth_url http://controller:5000/v3
+./conf.sh /etc/nova/nova.conf keystone_authtoken memcached_servers controller:11211
+./conf.sh /etc/nova/nova.conf keystone_authtoken auth_type password
+./conf.sh /etc/nova/nova.conf keystone_authtoken project_domain_name Default
+./conf.sh /etc/nova/nova.conf keystone_authtoken user_domain_name Default
+./conf.sh /etc/nova/nova.conf keystone_authtoken project_name service
+./conf.sh /etc/nova/nova.conf keystone_authtoken username nova
+./conf.sh /etc/nova/nova.conf keystone_authtoken password password
+./conf.sh /etc/nova/nova.conf oslo_concurrency lock_path /var/lib/nova/tmp
+./conf.sh /etc/nova/nova.conf placement region_name = RegionOne
+./conf.sh /etc/nova/nova.conf placement project_domain_name Default
+./conf.sh /etc/nova/nova.conf placement project_name service
+./conf.sh /etc/nova/nova.conf placement auth_type password
+./conf.sh /etc/nova/nova.conf placement user_domain_name Default
+./conf.sh /etc/nova/nova.conf placement auth_url http://controller:5000/v3
+./conf.sh /etc/nova/nova.conf placement username placement
+./conf.sh /etc/nova/nova.conf placement password password
+./conf.sh /etc/nova/nova.conf vnc enabled true
+./conf.sh /etc/nova/nova.conf vnc server_listen 0.0.0.0
+# single quote '$my_ip' so bash doesn't try to interpret it
+./conf.sh /etc/nova/nova.conf vnc server_proxyclient_address '$my_ip'
+./conf.sh /etc/nova/nova.conf vnc novncproxy_base_url http://controller:6080/vnc_auto.html
+
+# start services
 
 for i in enable start;do systemctl $i libvirtd openstack-nova-compute;done
 
@@ -595,13 +595,15 @@ for i in enable start;do systemctl $i libvirtd openstack-nova-compute;done
 # => controller node
 #-------------------
 
+# discover compute hosts
+
 source ~/adminrc
 
 openstack compute service list --service nova-compute
 
 su -s /bin/sh -c "nova-manage cell_v2 discover_hosts --verbose" nova
 
-# verifications
+# do some verifications
 
 openstack compute service list
 
@@ -619,7 +621,11 @@ nova-status upgrade check
 # => controller node
 #-------------------
 
+# create neutron database
+
 ./dbcreate.sh neutron neutron password
+
+# create user, add role, create service and endpoints
 
 source ~/adminrc
 
@@ -631,12 +637,15 @@ openstack service create --name neutron --description "OpenStack Networking" net
 
 ./endpoint.sh network 9696
 
+# install packages
+
 yum -y install openstack-neutron
+
+# conf file work
 
 ./bak.sh /etc/neutron/neutron.conf
 
 ./conf.sh /etc/neutron/neutron.conf database connection mysql+pymysql://neutron:password@controller/neutron
-
 ./conf.sh /etc/neutron/neutron.conf DEFAULT core_plugin ml2
 ./conf.sh /etc/neutron/neutron.conf DEFAULT service_plugins router
 ./conf.sh /etc/neutron/neutron.conf DEFAULT allow_overlapping_ips true
@@ -644,7 +653,6 @@ yum -y install openstack-neutron
 ./conf.sh /etc/neutron/neutron.conf DEFAULT auth_strategy keystone
 ./conf.sh /etc/neutron/neutron.conf DEFAULT notify_nova_on_port_status_changes true
 ./conf.sh /etc/neutron/neutron.conf DEFAULT notify_nova_on_port_data_changes true
-
 ./conf.sh /etc/neutron/neutron.conf keystone_authtoken www_authenticate_uri http://controller:5000
 ./conf.sh /etc/neutron/neutron.conf keystone_authtoken auth_url http://controller:5000
 ./conf.sh /etc/neutron/neutron.conf keystone_authtoken memcached_servers controller:11211
@@ -654,7 +662,6 @@ yum -y install openstack-neutron
 ./conf.sh /etc/neutron/neutron.conf keystone_authtoken project_name service
 ./conf.sh /etc/neutron/neutron.conf keystone_authtoken username neutron
 ./conf.sh /etc/neutron/neutron.conf keystone_authtoken password password
-
 ./conf.sh /etc/neutron/neutron.conf nova auth_url http://controller:5000
 ./conf.sh /etc/neutron/neutron.conf nova auth_type password
 ./conf.sh /etc/neutron/neutron.conf nova project_domain_name default
@@ -663,23 +670,6 @@ yum -y install openstack-neutron
 ./conf.sh /etc/neutron/neutron.conf nova project_name service
 ./conf.sh /etc/neutron/neutron.conf nova username nova
 ./conf.sh /etc/neutron/neutron.conf nova password password
-
 ./conf.sh /etc/neutron/neutron.conf oslo_concurrency lock_path /var/lib/neutron/tmp
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
