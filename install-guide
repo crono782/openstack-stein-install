@@ -871,7 +871,7 @@ ovs-vsctl show
 
 ./bak.sh /etc/neutron/plugins/ml2/openvswitch_agent.ini
 
-./conf.sh /etc/neutron/plugins/ml2/openvswitch_agent.ini ovs local_ip 10.10.10.51
+./conf.sh /etc/neutron/plugins/ml2/openvswitch_agent.ini ovs local_ip 10.10.20.51
 ./conf.sh /etc/neutron/plugins/ml2/openvswitch_agent.ini ovs bridge_mappings provider:br-provider
 ./conf.sh /etc/neutron/plugins/ml2/openvswitch_agent.ini agent tunnel_types vxlan
 ./conf.sh /etc/neutron/plugins/ml2/openvswitch_agent.ini agent l2_population True
