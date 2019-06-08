@@ -320,6 +320,15 @@ if [ "$(openstack role list -c Name -f value|grep -c '^member$')" > 0 ]; then op
 
 openstack role add --project learnoss --user dqueen member
 
+cp ~/adminrc ~/dqueenrc
+
+sed -i -e '/OS_PROJECT_NAME/ s/admin/learnoss/'\
+ -e '/OS_USERNAME/ s/admin/dqueen/'\
+ -e '/OS_PASSWORD/ s/password/password/'\
+ -e '/PS1/ s/$red/$yellow/' ~/dqueenrc
+
+
+
 ###############################
 # - PART 3: GLANCE INSTALLATION
 ###############################
@@ -394,6 +403,8 @@ yum -y install wget
 wget http://download.cirros-cloud.net/0.4.0/cirros-0.4.0-x86_64-disk.img
 
 openstack image create "cirros" --file cirros-0.4.0-x86_64-disk.img --disk-format qcow2 --container-format bare --public
+
+rm -f cirros-0.4.0-x86_64-disk.img
 
 ##################################
 # - PART 4: PLACEMENT INSTALLATION
@@ -1022,7 +1033,7 @@ vgcreate cindervols-hdd /dev/vd{d,e}
 
 # apply device filters to LVM
 
-l=$(sed -n '/# filter = /=' /etc/lvm/lvm.conf|tail -n1);sed -i "${l}a filter = [ 'a|vda|','a|vdb|','a|vdc|','a|vdd|','a|vde|','r|.*|' ]" /etc/lvm/lvm.conf|grep filter
+l=$(sed -n '/# filter = /=' /etc/lvm/lvm.conf|tail -n1);sed -i "${l}a filter = [ 'a|vda|','a|vdb|','a|vdc|','a|vdd|','a|vde|','r|.*|' ]" /etc/lvm/lvm.conf
 
 # install packages
 
@@ -1036,7 +1047,7 @@ yum -y install openstack-cinder targetcli python-keystone
 ./conf.sh /etc/cinder/cinder.conf DEFAULT transport_url rabbit://openstack:password@controller
 ./conf.sh /etc/cinder/cinder.conf DEFAULT auth_strategy keystone
 ./conf.sh /etc/cinder/cinder.conf DEFAULT my_ip 10.10.10.54
-./conf.sh /etc/cinder/cinder.conf DEFAULT enabled_backends lvm-ssd, lvm-hdd
+./conf.sh /etc/cinder/cinder.conf DEFAULT enabled_backends lvm-ssd,lvm-hdd
 ./conf.sh /etc/cinder/cinder.conf DEFAULT glance_api_servers http://controller:9292
 ./conf.sh /etc/cinder/cinder.conf keystone_authtoken www_authenticate_uri http://controller:5000
 ./conf.sh /etc/cinder/cinder.conf keystone_authtoken auth_url http://controller:5000
@@ -1073,22 +1084,440 @@ openstack volume service list
 # - PART 8: SWIFT INSTALLATION
 ###############################
 
+#-------------------
+# => controller node
+#-------------------
+
+# create user, add role, create services and endpoints
+
+source ~/adminrc
+
+openstack user create --domain default --password password swift
+
+openstack role add --project service --user swift admin
+
+openstack service create --name swift --description "OpenStack Object Storage" object-store
+
+./endpoint.sh object-store 8080/v1/AUTH_%\(project_id\)s
+
+# install packages
+
+yum -y install openstack-swift-proxy python-swiftclient python-keystoneclient python-keystonemiddleware memcached
+
+# archive old proxy-server.conf file
+
+cp -p /etc/swift/proxy-server.conf /etc/swift/proxy-server.conf.orig
+
+# download new proxy-server.conf file
+
+curl -o /etc/swift/proxy-server.conf https://opendev.org/openstack/swift/raw/branch/stable/stein/etc/proxy-server.conf-sample
+
+# swap pipelines before working on conf file
+
+sed -i -e '/^pipeline/ s/^p/#p/' -e '/^#pipeline.*authtoken/ s/^#//' /etc/swift/proxy-server.conf
+
+# conf file work
+
+./bak.sh /etc/swift/proxy-server.conf
+
+./conf.sh /etc/swift/proxy-server.conf DEFAULT bind_port 8080
+./conf.sh /etc/swift/proxy-server.conf DEFAULT user swift
+./conf.sh /etc/swift/proxy-server.conf DEFAULT swift_dir /etc/swift
+sed -i '/^pipeline/ s/temp[^ ]* //' /etc/swift/proxy-server.conf
+./conf.sh /etc/swift/proxy-server.conf app:proxy-server use egg:swift#proxy
+./conf.sh /etc/swift/proxy-server.conf app:proxy-server account_autocreate True
+./conf.sh /etc/swift/proxy-server.conf filter:keystoneauth use egg:swift#keystoneauth
+./conf.sh /etc/swift/proxy-server.conf filter:keystoneauth operator_roles admin,member
+./conf.sh /etc/swift/proxy-server.conf filter:authtoken paste.filter_factory keystonemiddleware.auth_token:filter_factory
+./conf.sh /etc/swift/proxy-server.conf filter:authtoken www_authenticate_uri http://controller:5000
+./conf.sh /etc/swift/proxy-server.conf filter:authtoken auth_url http://controller:5000
+./conf.sh /etc/swift/proxy-server.conf filter:authtoken memcached_servers controller:11211
+./conf.sh /etc/swift/proxy-server.conf filter:authtoken auth_type password
+./conf.sh /etc/swift/proxy-server.conf filter:authtoken project_domain_id default
+./conf.sh /etc/swift/proxy-server.conf filter:authtoken user_domain_id default
+./conf.sh /etc/swift/proxy-server.conf filter:authtoken project_name service
+./conf.sh /etc/swift/proxy-server.conf filter:authtoken username swift
+./conf.sh /etc/swift/proxy-server.conf filter:authtoken password password
+./conf.sh /etc/swift/proxy-server.conf filter:authtoken delay_auth_decision True
+./conf.sh /etc/swift/proxy-server.conf filter:cache use egg:swift#memcache
+./conf.sh /etc/swift/proxy-server.conf filter:cache memcache_servers controller:11211
+
+#---------------
+# => object node
+#---------------
+
+# install prereq packages
+
+yum -y install xfsprogs rsync
+
+# prepare disks, create mount points, add to fstab, and mount
+
+for i in b c d;do
+  mkfs.xfs /dev/vd$i;done
+  mkdir -p /srv/node/vd$i
+  echo /dev/vd$i /srv/node/vd$i xfs noatime,nodiratime,nobarrier,logbufs=8 0 2 >> /etc/fstab
+  mount /srv/node/vd$i
+done
+
+cat << EOF >> /etc/rsyncd.conf
+uid = swift
+gid = swift
+log file = /var/log/rsyncd.log
+pid file = /var/run/rsyncd.pid
+address = 10.10.10.55
+
+[account]
+max connections = 2
+path = /srv/node/
+read only = False
+lock file = /var/lock/account.lock
+
+[container]
+max connections = 2
+path = /srv/node/
+read only = False
+lock file = /var/lock/container.lock
+
+[object]
+max connections = 2
+path = /srv/node/
+read only = False
+lock file = /var/lock/object.lock
+EOF
+
+# enable and start services
+
+for i in enable start;do systemctl $i rsyncd;done
+
+# install packages
+
+yum -y install openstack-swift-account openstack-swift-container openstack-swift-object
+
+# archive original conf files and download new ones
+
+for i in account container object;do
+  cp -p /etc/swift/$i-server.conf /etc/swift/$i-server.conf.orig
+  curl -o /etc/swift/$i-server.conf https://opendev.org/openstack/swift/raw/branch/stable/stein/etc/$i-server.conf-sample
+done
+
+# conf file work
+
+./bak.sh /etc/swift/account-server.conf
+
+./conf.sh /etc/swift/account-server.conf DEFAULT bind_ip 10.10.10.55
+./conf.sh /etc/swift/account-server.conf DEFAULT bind_port 6202
+./conf.sh /etc/swift/account-server.conf DEFAULT user swift
+./conf.sh /etc/swift/account-server.conf DEFAULT swift_dir /etc/swift
+./conf.sh /etc/swift/account-server.conf DEFAULT devices /srv/node
+./conf.sh /etc/swift/account-server.conf DEFAULT mount_check True
+./conf.sh /etc/swift/account-server.conf pipeline:main pipeline 'healthcheck recon account-server'
+./conf.sh /etc/swift/account-server.conf filter:recon use egg:swift#recon
+./conf.sh /etc/swift/account-server.conf filter:recon recon_cache_path /var/cache/swift
+
+./bak.sh /etc/swift/container-server.conf
+
+./conf.sh /etc/swift/container-server.conf DEFAULT bind_ip 10.10.10.55
+./conf.sh /etc/swift/container-server.conf DEFAULT bind_port 6201
+./conf.sh /etc/swift/container-server.conf DEFAULT user swift
+./conf.sh /etc/swift/container-server.conf DEFAULT swift_dir /etc/swift
+./conf.sh /etc/swift/container-server.conf DEFAULT devices /srv/node
+./conf.sh /etc/swift/container-server.conf DEFAULT mount_check True
+./conf.sh /etc/swift/container-server.conf pipeline:main pipeline 'healthcheck recon container-server'
+./conf.sh /etc/swift/container-server.conf filter:recon use egg:swift#recon
+./conf.sh /etc/swift/container-server.conf filter:recon recon_cache_path /var/cache/swift
+
+./bak.sh /etc/swift/object-server.conf
+
+./conf.sh /etc/swift/object-server.conf DEFAULT bind_ip 10.10.10.55
+./conf.sh /etc/swift/object-server.conf DEFAULT bind_port 6200
+./conf.sh /etc/swift/object-server.conf DEFAULT user swift
+./conf.sh /etc/swift/object-server.conf DEFAULT swift_dir /etc/swift
+./conf.sh /etc/swift/object-server.conf DEFAULT devices /srv/node
+./conf.sh /etc/swift/object-server.conf DEFAULT mount_check True
+./conf.sh /etc/swift/object-server.conf pipeline:main pipeline 'healthcheck recon object-server'
+./conf.sh /etc/swift/object-server.conf filter:recon use egg:swift#recon
+./conf.sh /etc/swift/object-server.conf filter:recon recon_cache_path /var/cache/swift
+
+# set permissions
+
+chown -R swift:swift /srv/node
+
+# make sure cache dir is created and permissions are set
+
+mkdir -p /var/cache/swift
+chown -R root:swift /var/cache/swift
+chmod -R 775 /var/cache/swift
+
+#-------------------
+# => controller node
+#-------------------
+
+# create initial rings
+
+cd /etc/swift
+
+swift-ring-builder account.builder create 10 3 1
+for i in b c d;do swift-ring-builder account.builder add --region 1 --zone 1 --ip 10.10.10.55 --port 6202 --device vd$i --weight 100;done
+swift-ring-builder account.builder rebalance
+swift-ring-builder account.builder
+
+swift-ring-builder container.builder create 10 3 1
+for i in b c d;do swift-ring-builder container.builder add --region 1 --zone 1 --ip 10.10.10.55 --port 6201 --device vd$i --weight 100;done
+swift-ring-builder container.builder rebalance
+swift-ring-builder container.builder
+
+swift-ring-builder object.builder create 10 3 1
+for i in b c d;do swift-ring-builder object.builder add --region 1 --zone 1 --ip 10.10.10.55 --port 6200 --device vd$i --weight 100;done
+swift-ring-builder object.builder rebalance
+swift-ring-builder object.builder
+
+cd ~
+
+# distribute ring files to object node
+
+scp /etc/swift/*.gz object:/etc/swift/
+
+# back up swift.conf file and download new one
+
+cp -p /etc/swift/swift.conf /etc/swift/swift.conf.orig
+curl -o /etc/swift/swift.conf https://opendev.org/openstack/swift/raw/branch/stable/stein/etc/swift.conf-sample
+
+# conf file work
+
+./bak.sh /etc/swift/swift.conf
+
+./conf.sh /etc/swift/swift.conf swift-hash swift_hash_path_suffix swifthashsuffix
+./conf.sh /etc/swift/swift.conf swift-hash swift_hash_path_prefix swifthashprefix
+./conf.sh /etc/swift/swift.conf storage-policy:0 name Policy-0
+./conf.sh /etc/swift/swift.conf storage-policy:0 default yes
+
+# distribute swift.conf to object node
+
+scp /etc/swift/swift.conf object:/etc/swift/
+
+# ensure proper ownership of swift dir
+
+chown -R root:swift /etc/swift
+
+# start services
+
+for i in enable start;do systemctl $i openstack-swift-proxy memcached;done
+
+#---------------
+# => object node
+#---------------
+
+# ensure proper ownership of swift dir
+
+chown -R root:swift /etc/swift
+
+# fix selinux
+
+chcon -R system_u:object_r:swift_data_t:s0 /srv/node
+
+for i in enable start;do systemctl $i openstack-swift-account{,-auditor,-reaper,-replicator};done
+for i in enable start;do systemctl $i openstack-swift-container{,-auditor,-replicator,-updater};done
+for i in enable start;do systemctl $i openstack-swift-object{,-auditor,-replicator,-updater};done
+
+#-------------------
+# => controller node
+#-------------------
+
+# some verifications
+
+source ~/dqueenrc
+
+swift stat
+openstack container create container1
+echo "swift test file" > swiftfile.txt
+openstack object create container1 swiftfile.txt
+openstack object list container1
+rm -f swiftfile.txt
+openstack object save container1 swiftfile.txt
+cat swiftfile.txt
+rm -f swiftfile.txt
+openstack object delete container1 swiftfile.txt
+openstack container delete container1
+
+########################################
+# - PART 9: RECONFIG GLANCE TO USE SWIFT
+########################################
+
+#-------------------
+# => controller node
+#-------------------
+
+# conf file work
+
+./conf.sh /etc/glance/glance-api.conf glance_store stores swift,file,http
+./conf.sh /etc/glance/glance-api.conf glance_store default_store swift
+./conf.sh /etc/glance/glance-api.conf glance_store swift_store_create_container_on_put True
 
 
+#######################################
+# - OPTION A: SINGLE TENANT
+# (all images stored in service account
+#######################################
 
+# conf file work
 
+./conf.sh /etc/glance/glance-api.conf glance_store default_swift_reference glance-swift
+./conf.sh /etc/glance/glance-api.conf glance_store swift_store_config_file /etc/glance/glance-swift.conf
 
+cat << EOF >> /etc/glance/glance-swift.conf
+[glance-swift]
+user = service:glance
+key = password
+user_domain_id = default
+project_domain_id = default
+auth_version = 3
+auth_address = http://controller:5000/v3
+EOF
 
+# restart api
 
+systemctl restart openstack-glance-api
 
+###################################
+# - OPTION B: MULTI TENANT
+# (images stored in tenant account)
+###################################
 
+# conf file work
 
+./conf.sh /etc/glance/glance-api.conf glance_store swift_store_multi_tenant True
 
+# restart api
 
+systemctl restart openstack-glance-api
 
+#############################################
+# - PART 10: ENABLE CINDER TO BACKUP TO SWIFT
+#############################################
 
+#--------------
+# => block node
+#--------------
 
+# ensure package installed
 
+yum -y install openstack-cinder
 
+# conf file work
 
+./conf.sh /etc/cinder/cinder.conf DEFAULT backup_driver cinder.backup.drivers.swift
+./conf.sh /etc/cinder/cinder.conf DEFAULT backup_swift_url http://controller:8080/v1/AUTH_
 
+# enable and start backup service
+
+for i in enable start;do systemctl $i openstack-cinder-backup;done
+
+#-------------------
+# => controller node
+#-------------------
+
+# enable backup feature in horizon
+
+sed -i '/OPENSTACK_CINDER_FEATURES/,/\}/ s/False/True/' /etc/openstack-dashboard/local_settings
+
+systemctl reload httpd
+
+##############################
+# - PART 11: HEAT INSTALLATION
+##############################
+
+#-------------------
+# => controller node
+#-------------------
+
+# create database
+
+./dbcreate.sh heat heat password
+
+# create projects, users, roles, domains, endpoints, etc
+
+source ~/adminrc
+
+openstack user create --domain default --password password heat
+
+openstack role add --project service --user heat admin
+
+openstack service create --name heat --description "Orchestration" orchestration
+
+openstack service create --name heat-cfn --description "Orchestration"  cloudformation
+
+./endpoint.sh orchestration 8004/v1/%\(tenant_id\)s
+
+./endpoint.sh cloudformation 8000/v1
+
+openstack domain create --description "Stack projects and users" heat
+
+openstack user create --domain heat --password password heat_domain_admin
+
+openstack role add --domain heat --user-domain heat --user heat_domain_admin admin
+
+openstack role create heat_stack_owner
+
+openstack role add --project learnoss --user dqueen heat_stack_owner
+
+openstack role create heat_stack_user
+
+# install packages
+
+yum -y install openstack-heat-api openstack-heat-api-cfn openstack-heat-engine
+
+# conf file work
+
+./bak.sh /etc/heat/heat.conf
+
+./conf.sh /etc/heat/heat.conf database connection mysql+pymysql://heat:password@controller/heat
+./conf.sh /etc/heat/heat.conf DEFAULT transport_url rabbit://openstack:password@controller
+./conf.sh /etc/heat/heat.conf DEFAULT heat_metadata_server_url http://controller:8000
+./conf.sh /etc/heat/heat.conf DEFAULT heat_waitcondition_server_url http://controller:8000/v1/waitcondition
+./conf.sh /etc/heat/heat.conf DEFAULT stack_domain_admin heat_domain_admin
+./conf.sh /etc/heat/heat.conf DEFAULT stack_domain_admin_password password
+./conf.sh /etc/heat/heat.conf DEFAULT stack_user_domain_name heat
+./conf.sh /etc/heat/heat.conf keystone_authtoken auth_uri http://controller:5000
+./conf.sh /etc/heat/heat.conf keystone_authtoken auth_url http://controller:5000
+./conf.sh /etc/heat/heat.conf keystone_authtoken memcached_servers controller:11211
+./conf.sh /etc/heat/heat.conf keystone_authtoken auth_type password
+./conf.sh /etc/heat/heat.conf keystone_authtoken project_domain_name default
+./conf.sh /etc/heat/heat.conf keystone_authtoken user_domain_name default
+./conf.sh /etc/heat/heat.conf keystone_authtoken project_name service
+./conf.sh /etc/heat/heat.conf keystone_authtoken username heat
+./conf.sh /etc/heat/heat.conf keystone_authtoken password password
+./conf.sh /etc/heat/heat.conf trustee auth_type password
+./conf.sh /etc/heat/heat.conf trustee auth_url http://controller:5000
+./conf.sh /etc/heat/heat.conf trustee username heat
+./conf.sh /etc/heat/heat.conf trustee password password
+./conf.sh /etc/heat/heat.conf trustee user_domain_name default
+./conf.sh /etc/heat/heat.conf clients_keystone auth_uri http://controller:5000
+
+# populate database
+
+su -s /bin/sh -c "heat-manage db_sync" heat
+
+# enable and start services
+
+for i in enable start;do systemctl $i openstack-heat-{api{,-cfn},engine};done
+
+# verifications
+
+source ~/adminrc
+
+openstack orchestration service list
+
+# install heat dashboard packages
+
+yum -y install openstack-heat-ui
+
+# reload apache
+
+systemctl reload httpd
+
+#############################################################
+########### END OF GUIDE. I HOPE YOU ENJOYED IT!! ###########
+#############################################################
+# This guide is a living document, so I will continue to
+# update it adding new features and such. Check back for more
+#############################################################
