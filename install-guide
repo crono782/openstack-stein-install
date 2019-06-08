@@ -573,7 +573,7 @@ yum -y install openstack-nova-compute
 ./conf.sh /etc/nova/nova.conf keystone_authtoken username nova
 ./conf.sh /etc/nova/nova.conf keystone_authtoken password password
 ./conf.sh /etc/nova/nova.conf oslo_concurrency lock_path /var/lib/nova/tmp
-./conf.sh /etc/nova/nova.conf placement region_name = RegionOne
+./conf.sh /etc/nova/nova.conf placement region_name RegionOne
 ./conf.sh /etc/nova/nova.conf placement project_domain_name Default
 ./conf.sh /etc/nova/nova.conf placement project_name service
 ./conf.sh /etc/nova/nova.conf placement auth_type password
