@@ -518,7 +518,7 @@ yum -y install openstack-nova-api openstack-nova-conductor openstack-nova-novncp
 ./conf.sh /etc/nova/nova.conf keystone_authtoken username nova
 ./conf.sh /etc/nova/nova.conf keystone_authtoken password password
 ./conf.sh /etc/nova/nova.conf oslo_concurrency lock_path /var/lib/nova/tmp
-./conf.sh /etc/nova/nova.conf placement region_name = RegionOne
+./conf.sh /etc/nova/nova.conf placement region_name RegionOne
 ./conf.sh /etc/nova/nova.conf placement project_domain_name Default
 ./conf.sh /etc/nova/nova.conf placement project_name service
 ./conf.sh /etc/nova/nova.conf placement auth_type password
@@ -639,7 +639,7 @@ openstack service create --name neutron --description "OpenStack Networking" net
 
 # install packages
 
-yum -y install openstack-neutron
+yum -y install openstack-neutron openstack-neutron-ml2
 
 # conf file work
 
@@ -649,7 +649,7 @@ yum -y install openstack-neutron
 ./conf.sh /etc/neutron/neutron.conf DEFAULT core_plugin ml2
 ./conf.sh /etc/neutron/neutron.conf DEFAULT service_plugins router
 ./conf.sh /etc/neutron/neutron.conf DEFAULT allow_overlapping_ips true
-./conf.sh /etc/neutron/neutron.conf DEFAULT transport_url rabbit://openstack:RABBIT_PASS@controller
+./conf.sh /etc/neutron/neutron.conf DEFAULT transport_url rabbit://openstack:password@controller
 ./conf.sh /etc/neutron/neutron.conf DEFAULT auth_strategy keystone
 ./conf.sh /etc/neutron/neutron.conf DEFAULT notify_nova_on_port_status_changes true
 ./conf.sh /etc/neutron/neutron.conf DEFAULT notify_nova_on_port_data_changes true
@@ -671,5 +671,270 @@ yum -y install openstack-neutron
 ./conf.sh /etc/neutron/neutron.conf nova username nova
 ./conf.sh /etc/neutron/neutron.conf nova password password
 ./conf.sh /etc/neutron/neutron.conf oslo_concurrency lock_path /var/lib/neutron/tmp
+
+./bak.sh /etc/neutron/plugins/ml2/ml2_conf.ini
+
+./conf.sh /etc/neutron/plugins/ml2/ml2_conf.ini ml2 type_drivers flat,vlan,vxlan
+./conf.sh /etc/neutron/plugins/ml2/ml2_conf.ini ml2 tenant_network_types vxlan
+./conf.sh /etc/neutron/plugins/ml2/ml2_conf.ini ml2 mechanism_drivers openvswitch,l2population
+./conf.sh /etc/neutron/plugins/ml2/ml2_conf.ini ml2 extension_drivers port_security
+./conf.sh /etc/neutron/plugins/ml2/ml2_conf.ini ml2_type_flat flat_networks provider
+./conf.sh /etc/neutron/plugins/ml2/ml2_conf.ini ml2_type_vxlan vni_ranges 1:1000
+./conf.sh /etc/neutron/plugins/ml2/ml2_conf.ini securitygroup enable_ipset true
+
+
+./conf.sh /etc/nova/nova.conf neutron url http://controller:9696
+./conf.sh /etc/nova/nova.conf neutron auth_url http://controller:5000
+./conf.sh /etc/nova/nova.conf neutron auth_type password
+./conf.sh /etc/nova/nova.conf neutron project_domain_name default
+./conf.sh /etc/nova/nova.conf neutron user_domain_name default
+./conf.sh /etc/nova/nova.conf neutron region_name RegionOne
+./conf.sh /etc/nova/nova.conf neutron project_name service
+./conf.sh /etc/nova/nova.conf neutron username neutron
+./conf.sh /etc/nova/nova.conf neutron password password
+./conf.sh /etc/nova/nova.conf neutron service_metadata_proxy true
+./conf.sh /etc/nova/nova.conf neutron metadata_proxy_shared_secret metasecret
+
+# link plugin.ini
+ln -s /etc/neutron/plugins/ml2/ml2_conf.ini /etc/neutron/plugin.ini
+
+# populate database
+su -s /bin/sh -c "neutron-db-manage --config-file /etc/neutron/neutron.conf --config-file /etc/neutron/plugins/ml2/ml2_conf.ini upgrade head" neutron
+
+# restart nova api
+systemctl restart openstack-nova-api
+
+# start service
+for i in enable start;do systemctl $i neutron-server;done
+
+#----------------
+# => network node
+#----------------
+
+# install packages
+
+yum -y install openstack-neutron openstack-neutron-openvswitch libibverbs ebtables
+
+# init openvswitch
+
+for i in enable start;do systemctl $i openvswitch;done
+
+# create provider bridge
+
+ovs-vsctl add-br br-provider
+ovs-vsctl add-port eth2 br-provider
+
+# create provider bridge network script
+
+cat << EOF > /etc/sysconfig/network-scripts/ifcfg-br-provider
+TYPE="OVSBridge"
+BOOTPROTO="none"
+DEFROUTE="no"
+IPV6INIT="no"
+NAME="br-provider"
+DEVICE="br-provider"
+DEVICETYPE="ovs"
+ONBOOT="yes"
+EOF
+
+# reconfigure interface network script
+
+sed -i -e 's/^TYPE=.*/TYPE="OVSPort"/' -e '/^HWADDR/d' /etc/sysconfig/network-scripts/ifcfg-eth2
+cat << EOF >> /etc/sysconfig/network-scripts/ifcfg-eth2
+DEVICETYPE="ovs"
+OVS_BRIDGE="br-provider"
+EOF
+
+# reset bridge and port
+ifdown br-provider
+ifdown eth2
+ifup br-provider
+ifup eth2
+
+# quick verification
+
+ovs-vsctl show
+
+# conf file work
+
+./bak.sh /etc/neutron/neutron.conf
+
+./conf.sh /etc/neutron/neutron.conf DEFAULT core_plugin ml2
+./conf.sh /etc/neutron/neutron.conf DEFAULT service_plugins router
+./conf.sh /etc/neutron/neutron.conf DEFAULT allow_overlapping_ips true
+./conf.sh /etc/neutron/neutron.conf DEFAULT transport_url rabbit://openstack:password@controller
+./conf.sh /etc/neutron/neutron.conf DEFAULT auth_strategy keystone
+./conf.sh /etc/neutron/neutron.conf DEFAULT notify_nova_on_port_status_changes true
+./conf.sh /etc/neutron/neutron.conf DEFAULT notify_nova_on_port_data_changes true
+./conf.sh /etc/neutron/neutron.conf keystone_authtoken www_authenticate_uri http://controller:5000
+./conf.sh /etc/neutron/neutron.conf keystone_authtoken auth_url http://controller:5000
+./conf.sh /etc/neutron/neutron.conf keystone_authtoken memcached_servers controller:11211
+./conf.sh /etc/neutron/neutron.conf keystone_authtoken auth_type password
+./conf.sh /etc/neutron/neutron.conf keystone_authtoken project_domain_name default
+./conf.sh /etc/neutron/neutron.conf keystone_authtoken user_domain_name default
+./conf.sh /etc/neutron/neutron.conf keystone_authtoken project_name service
+./conf.sh /etc/neutron/neutron.conf keystone_authtoken username neutron
+./conf.sh /etc/neutron/neutron.conf keystone_authtoken password password
+./conf.sh /etc/neutron/neutron.conf oslo_concurrency lock_path /var/lib/neutron/tmp
+
+./bak.sh /etc/neutron/plugins/ml2/openvswitch_agent.ini
+
+./conf.sh /etc/neutron/plugins/ml2/openvswitch_agent.ini ovs bridge_mappings provider:br-provider
+./conf.sh /etc/neutron/plugins/ml2/openvswitch_agent.ini ovs local_ip 10.10.20.53
+./conf.sh /etc/neutron/plugins/ml2/openvswitch_agent.ini agent tunnel_types vxlan
+./conf.sh /etc/neutron/plugins/ml2/openvswitch_agent.ini agent l2_population True
+./conf.sh /etc/neutron/plugins/ml2/openvswitch_agent.ini securitygroup firewall_driver iptables_hybrid
+
+./bak.sh /etc/neutron/l3_agent.ini
+
+./conf.sh /etc/neutron/l3_agent.ini DEFAULT interface_driver openvswitch
+# empty quotes so we get a intentionally blank value
+./conf.sh /etc/neutron/l3_agent.ini DEFAULT external_network_bridge ''
+
+./bak.sh /etc/neutron/dhcp_agent.ini
+
+./conf.sh /etc/neutron/dhcp_agent.ini DEFAULT interface_driver openvswitch
+./conf.sh /etc/neutron/dhcp_agent.ini DEFAULT dhcp_driver neutron.agent.linux.dhcp.Dnsmasq
+./conf.sh /etc/neutron/dhcp_agent.ini DEFAULT enable_isolated_metadata true
+
+./bak.sh /etc/neutron/metadata_agent.ini
+
+./conf.sh /etc/neutron/metadata_agent.ini DEFAULT nova_metadata_host controller
+./conf.sh /etc/neutron/metadata_agent.ini DEFAULT metadata_proxy_shared_secret metasecret
+
+# start services
+
+for i in enable start;do systemctl $i neutron-{openvswitch,dhcp,metadata,l3}-agent;done
+
+#----------------
+# => compute node
+#----------------
+
+# install packages
+
+yum -y install openstack-neutron-openvswitch ebtables ipset
+
+# init openvswitch
+
+for i in enable start;do systemctl $i openvswitch;done
+
+# create provider bridge
+
+ovs-vsctl add-br br-provider
+ovs-vsctl add-port eth2 br-provider
+
+# create provider bridge network script
+
+cat << EOF > /etc/sysconfig/network-scripts/ifcfg-br-provider
+TYPE="OVSBridge"
+BOOTPROTO="none"
+DEFROUTE="no"
+IPV6INIT="no"
+NAME="br-provider"
+DEVICE="br-provider"
+DEVICETYPE="ovs"
+ONBOOT="yes"
+EOF
+
+# reconfigure interface network script
+
+sed -i -e 's/^TYPE=.*/TYPE="OVSPort"/' -e '/^HWADDR/d' /etc/sysconfig/network-scripts/ifcfg-eth2
+cat << EOF >> /etc/sysconfig/network-scripts/ifcfg-eth2
+DEVICETYPE="ovs"
+OVS_BRIDGE="br-provider"
+EOF
+
+# reset bridge and port
+ifdown br-provider
+ifdown eth2
+ifup br-provider
+ifup eth2
+
+# quick verification
+
+ovs-vsctl show
+
+./bak.sh /etc/neutron/neutron.conf
+
+./conf.sh /etc/neutron/neutron.conf DEFAULT transport_url rabbit://openstack:password@controller
+./conf.sh /etc/neutron/neutron.conf DEFAULT auth_strategy keystone
+./conf.sh /etc/neutron/neutron.conf keystone_authtoken www_authenticate_uri http://controller:5000
+./conf.sh /etc/neutron/neutron.conf keystone_authtoken auth_url http://controller:5000
+./conf.sh /etc/neutron/neutron.conf keystone_authtoken memcached_servers controller:11211
+./conf.sh /etc/neutron/neutron.conf keystone_authtoken auth_type password
+./conf.sh /etc/neutron/neutron.conf keystone_authtoken project_domain_name default
+./conf.sh /etc/neutron/neutron.conf keystone_authtoken user_domain_name default
+./conf.sh /etc/neutron/neutron.conf keystone_authtoken project_name service
+./conf.sh /etc/neutron/neutron.conf keystone_authtoken username neutron
+./conf.sh /etc/neutron/neutron.conf keystone_authtoken password password
+./conf.sh /etc/neutron/neutron.conf oslo_concurrency lock_path /var/lib/neutron/tmp
+
+./bak.sh /etc/neutron/plugins/ml2/openvswitch_agent.ini
+
+./conf.sh /etc/neutron/plugins/ml2/openvswitch_agent.ini ovs local_ip 10.10.10.51
+./conf.sh /etc/neutron/plugins/ml2/openvswitch_agent.ini ovs bridge_mappings provider:br-provider
+./conf.sh /etc/neutron/plugins/ml2/openvswitch_agent.ini agent tunnel_types vxlan
+./conf.sh /etc/neutron/plugins/ml2/openvswitch_agent.ini agent l2_population True
+
+./conf.sh /etc/nova/nova.conf neutron url http://controller:9696
+./conf.sh /etc/nova/nova.conf neutron auth_url http://controller:5000
+./conf.sh /etc/nova/nova.conf neutron auth_type password
+./conf.sh /etc/nova/nova.conf neutron project_domain_name default
+./conf.sh /etc/nova/nova.conf neutron user_domain_name default
+./conf.sh /etc/nova/nova.conf neutron region_name RegionOne
+./conf.sh /etc/nova/nova.conf neutron project_name service
+./conf.sh /etc/nova/nova.conf neutron username neutron
+./conf.sh /etc/nova/nova.conf neutron password password
+
+systemctl restart openstack-nova-compute
+
+for i in enable start;do systemctl $i neutron-openvswitch-agent;done
+
+#-------------------
+# => controller node
+#-------------------
+
+# verification (should show 4 agents on network node and 1 on each compute) 
+
+source ~/adminrc
+
+openstack network agent list
+
+################################
+# - PART 6: HORIZON INSTALLATION
+################################
+
+#-------------------
+# => controller node
+#-------------------
+
+# install packages
+
+yum -y install openstack-dashboard
+
+# config work
+
+cp -p /etc/openstack-dashboard/local_settings /etc/openstack-dashboard/local_settings.bkp
+
+sed -i 's/^OPENSTACK_HOST.*/OPENSTACK_HOST = "controller"/' /etc/openstack-dashboard/local_settings
+sed -i "s/^ALLOWED_HOSTS.*/ALLOWED_HOSTS = ['*']/" /etc/openstack-dashboard/local_settings
+sed -i '/^#CACHES/,/\}$/{s/^#//;s/127.0.0.1/controller/}' /etc/openstack-dashboard/local_settings
+sed -i "s/#\+SESSION_ENGINE.*/SESSION_ENGINE = 'django.contrib.sessions.backends.cache'/" /etc/openstack-dashboard/local_settings 
+sed -i '/OPENSTACK_API_VERSIONS/,/\}/{/compute/! s/^#//}' /etc/openstack-dashboard/local_settings
+sed -i 's/^OPENSTACK_KEYSTONE_DEFAULT_ROLE.*/OPENSTACK_KEYSTONE_DEFAULT_ROLE = "member"/' /etc/openstack-dashboard/local_settings
+
+sed -i '1iWSGIApplicationGroup %{GLOBAL}' /etc/httpd/conf.d/openstack-dashboard.conf 
+
+# restart services
+
+systemctl restart httpd memcached
+
+###############################
+# - PART 7: CINDER INSTALLATION
+###############################
+
+#-------------------
+# => controller node
+#-------------------
 
 
