@@ -15,8 +15,8 @@
 #   - networks: management
 #   - ips: 10.10.10.51
 # compute:
-#   - networks: management, tenant, provider, dbaas
-#   - ips: 10.10.10.52, 10.10.20.52, (none), (none)
+#   - networks: management, tenant, dbaas
+#   - ips: 10.10.10.52, 10.10.20.52, (none)
 #   - cpu: vmx extensions (nested virtualization or native)
 # network:
 #   - networks: management, tenant, provider, dbaas
@@ -829,42 +829,6 @@ yum -y install openstack-neutron-openvswitch ebtables ipset
 
 for i in enable start;do systemctl $i openvswitch;done
 
-# create provider bridge
-
-ovs-vsctl add-br br-provider
-ovs-vsctl add-port eth2 br-provider
-
-# create provider bridge network script
-
-cat << EOF > /etc/sysconfig/network-scripts/ifcfg-br-provider
-TYPE="OVSBridge"
-BOOTPROTO="none"
-DEFROUTE="no"
-IPV6INIT="no"
-NAME="br-provider"
-DEVICE="br-provider"
-DEVICETYPE="ovs"
-ONBOOT="yes"
-EOF
-
-# reconfigure interface network script
-
-sed -i -e 's/^TYPE=.*/TYPE="OVSPort"/' -e '/^HWADDR/d' /etc/sysconfig/network-scripts/ifcfg-eth2
-cat << EOF >> /etc/sysconfig/network-scripts/ifcfg-eth2
-DEVICETYPE="ovs"
-OVS_BRIDGE="br-provider"
-EOF
-
-# reset bridge and port
-ifdown br-provider
-ifdown eth2
-ifup br-provider
-ifup eth2
-
-# quick verification
-
-ovs-vsctl show
-
 ./bak.sh /etc/neutron/neutron.conf
 
 ./conf.sh /etc/neutron/neutron.conf DEFAULT transport_url rabbit://openstack:password@controller
@@ -883,7 +847,6 @@ ovs-vsctl show
 ./bak.sh /etc/neutron/plugins/ml2/openvswitch_agent.ini
 
 ./conf.sh /etc/neutron/plugins/ml2/openvswitch_agent.ini ovs local_ip 10.10.20.52
-./conf.sh /etc/neutron/plugins/ml2/openvswitch_agent.ini ovs bridge_mappings provider:br-provider
 ./conf.sh /etc/neutron/plugins/ml2/openvswitch_agent.ini agent tunnel_types vxlan
 ./conf.sh /etc/neutron/plugins/ml2/openvswitch_agent.ini agent l2_population True
 
