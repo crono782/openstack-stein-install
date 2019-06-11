@@ -9,17 +9,17 @@
 #   - Mangement Network: 10.10.10.0/24 (default route, NAT)
 #   - Tenant (Overlay) Network: 10.10.20.0/24
 #   - Provider Network: 203.0.13.0/24
-#   - DBaaS Network: 172.16.0.0/24
+#   - Services Network: 172.16.0.0/24
 # HOSTS: CentOS 7 minimal:
 # controller:
 #   - networks: management
 #   - ips: 10.10.10.51
 # compute:
-#   - networks: management, tenant, dbaas
-#   - ips: 10.10.10.52, 10.10.20.52, (none)
+#   - networks: management, tenant, provider, services
+#   - ips: 10.10.10.52, 10.10.20.52, (none), (none)
 #   - cpu: vmx extensions (nested virtualization or native)
 # network:
-#   - networks: management, tenant, provider, dbaas
+#   - networks: management, tenant, provider, services
 #   - ips: 10.10.10.53, 10.10.20.53, (none), (none)
 # block:
 #   - networks: management
@@ -30,8 +30,11 @@
 #   - ips: 10.10.10.55
 #   - disks: 3 extra disks (object storage)
 # dbaas:
-#   - networks: managememt, dbaas
+#   - networks: managememt, services
 #   - ips: 10.10.10.56, 172.16.0.2
+# share:
+#   - networks: management, services
+#   - ips: 10.10.10.57, 172.16.0.3
 #############################################################
 #############################################################
 
@@ -1478,9 +1481,277 @@ yum -y install openstack-heat-ui
 
 systemctl reload httpd
 
+################################
+# - PART 12: MANILA INSTALLATION
+################################
+
+# NOTES: Manila can be installed two ways.
+# Option A: probably best suited when only flat networks are used.
+#  - If you use a flat network for intances and they can reach the
+#    manila server, then set the export ip to the manila mgmt ip.
+#  - If you insist on tenant networks, you will need to attach a second
+#    interface of a flat network to reach the export ip. Could be the
+#    mgmt network or a service network.
+# Option B is probably better when tenant/overlay networks are used.
+#  - Share networks are created that map to tenant network.
+
+#-------------------
+# => controller node
+#-------------------
+
+# create database
+
+./dbcreate.sh manila manila password
+
+# create user, add role, create services and endpoints
+
+source ~/adminrc
+
+openstack user create --domain default --password password manila
+
+openstack role add --project service --user manila admin
+
+openstack service create --name manila --description "OpenStack Shared File Systems" share
+
+openstack service create --name manilav2 --description "OpenStack Shared File Systems V2" sharev2
+
+./endpoint.sh share 8786/v1/%\(tenant_id\)s
+
+./endpoint.sh sharev2 8786/v2/%\(tenant_id\)s
+
+# install packages
+
+yum -y install openstack-manila python-manilaclient
+
+# conf file work
+
+./bak.sh /etc/manila/manila.conf
+
+./conf.sh /etc/manila/manila.conf database connection mysql+pymysql://manila:password@controller/manila
+./conf.sh /etc/manila/manila.conf DEFAULT transport_url rabbit://openstack:password@controller
+./conf.sh /etc/manila/manila.conf DEFAULT default_share_type default_share_type
+./conf.sh /etc/manila/manila.conf DEFAULT share_name_template share-%s
+./conf.sh /etc/manila/manila.conf DEFAULT rootwrap_config /etc/manila/rootwrap.conf
+./conf.sh /etc/manila/manila.conf DEFAULT api_paste_config /etc/manila/api-paste.ini
+./conf.sh /etc/manila/manila.conf DEFAULT auth_strategy keystone
+./conf.sh /etc/manila/manila.conf DEFAULT my_ip 10.10.10.51
+./conf.sh /etc/manila/manila.conf keystone_authtoken memcached_servers controller:11211
+./conf.sh /etc/manila/manila.conf keystone_authtoken www_authenticate_uri http://controller:5000
+./conf.sh /etc/manila/manila.conf keystone_authtoken auth_url http://controller:5000
+./conf.sh /etc/manila/manila.conf keystone_authtoken auth_type password
+./conf.sh /etc/manila/manila.conf keystone_authtoken project_domain_name Default
+./conf.sh /etc/manila/manila.conf keystone_authtoken user_domain_name Default
+./conf.sh /etc/manila/manila.conf keystone_authtoken project_name service
+./conf.sh /etc/manila/manila.conf keystone_authtoken username manila
+./conf.sh /etc/manila/manila.conf keystone_authtoken password password
+./conf.sh /etc/manila/manila.conf oslo_concurrency lock_path /var/lib/manila/tmp
+
+# populate database
+
+su -s /bin/sh -c "manila-manage db sync" manila
+
+# enable and start services
+
+for i in enable start;do systemctl $i openstack-manila-{api,scheduler};done
+
+#--------------
+# => share node
+#--------------
+
+# install packages
+
+yum -y install openstack-manila-share python2-PyMySQL
+
+# conf file work
+
+./bak.sh /etc/manila/manila.conf
+
+./conf.sh /etc/manila/manila.conf database connection mysql+pymysql://manila:password@controller/manila
+./conf.sh /etc/manila/manila.conf DEFAULT transport_url rabbit://openstack:password@controller
+./conf.sh /etc/manila/manila.conf DEFAULT default_share_type default_share_type
+./conf.sh /etc/manila/manila.conf DEFAULT rootwrap_config /etc/manila/rootwrap.conf
+./conf.sh /etc/manila/manila.conf DEFAULT auth_strategy = keystone
+./conf.sh /etc/manila/manila.conf DEFAULT my_ip 10.10.10.57
+./conf.sh /etc/manila/manila.conf keystone_authtoken memcached_servers controller:11211
+./conf.sh /etc/manila/manila.conf keystone_authtoken www_authenticate_uri http://controller:5000
+./conf.sh /etc/manila/manila.conf keystone_authtoken auth_url http://controller:5000
+./conf.sh /etc/manila/manila.conf keystone_authtoken auth_type password
+./conf.sh /etc/manila/manila.conf keystone_authtoken project_domain_name Default
+./conf.sh /etc/manila/manila.conf keystone_authtoken user_domain_name Default
+./conf.sh /etc/manila/manila.conf keystone_authtoken project_name service
+./conf.sh /etc/manila/manila.conf keystone_authtoken username manila
+./conf.sh /etc/manila/manila.conf keystone_authtoken password password
+./conf.sh /etc/manila/manila.conf oslo_concurrency lock_path /var/lib/manila/tmp
+
+#######################################
+# - OPTION A: DHSS=False
+# (only manages share provisioning)
+# (done on block node or any node or
+# any node not running neutron agents)
+# (using lvm driver)
+#######################################
+
+#--------------
+# => share node
+#--------------
+
+# install packages
+
+yum -y install lvm2 nfs-utils nfs4-acl-tools portmap targetcli
+
+# start core services
+
+for i in enable start;do systemctl $i lvm2-lvmetad target;done
+
+pvcreate /dev/vd{b,c}
+
+vgcreate manila-volumes /dev/vd{b,c}
+
+# reconfig lvm.conf
+
+l=$(sed -n '/# filter = /=' /etc/lvm/lvm.conf|tail -n1);sed -i "${l}a filter = [ 'a|vda|','a|vdb|','a|vdc|','r|.*|' ]" /etc/lvm/lvm.conf
+
+# conf file work
+
+./conf.sh /etc/manila/manila.conf DEFAULT enabled_share_backends lvm
+./conf.sh /etc/manila/manila.conf DEFAULT enabled_share_protocols NFS
+./conf.sh /etc/manila/manila.conf lvm share_backend_name LVM
+./conf.sh /etc/manila/manila.conf lvm share_driver manila.share.drivers.lvm.LVMShareDriver
+./conf.sh /etc/manila/manila.conf lvm driver_handles_share_servers False
+./conf.sh /etc/manila/manila.conf lvm lvm_share_volume_group manila-volumes
+./conf.sh /etc/manila/manila.conf lvm lvm_share_export_ip 172.6.0.3
+
+# ensure system dirs created correctly
+
+mkdir /var/lib/manila
+chown manila:manila /var/lib/manila
+
+# start service
+
+for i in enable start;do systemctl $i nfs-server openstack-manila-share;done
+
+#-------------------
+# => controller node
+#-------------------
+
+# create default share type
+
+manila type-create default_share_type False
+
+#######################################
+# - OPTION B: DHSS=True
+# (provisions share servers per tenant)
+# (done one node w/ neutron agents
+# do not use lvm driver)
+# (using generic driver)
+#######################################
+
+#-------------------
+# => controller node
+#-------------------
+
+# obtain and upload manila image (optionally, build a custom one with diskimage-builder)
+
+wget http://tarballs.openstack.org/manila-image-elements/images/manila-service-image-master.qcow2
+
+source adminrc
+
+openstack image create "manila-service-image" --file manila-service-image-master.qcow2 --disk-format qcow2 --container-format bare --public
+
+# create flavor for manila to use
+
+openstack flavor create s1.manila --ram 256 --disk 0 --vcpus 1 --id 100
+
+#--------------
+# => share node
+#--------------
+
+# install packages
+
+yum -y install openstack-neutron openstack-neutron-openvswitch libibverbs ebtables
+
+# conf file work
+
+./conf.sh /etc/manila/manila.conf DEFAULT enabled_share_backends generic
+./conf.sh /etc/manila/manila.conf DEFAULT enabled_share_protocols NFS
+./conf.sh /etc/manila/manila.conf neutron url http://controller:9696
+./conf.sh /etc/manila/manila.conf neutron www_authenticate_uri http://controller:5000
+./conf.sh /etc/manila/manila.conf neutron auth_url http://controller:5000
+./conf.sh /etc/manila/manila.conf neutron memcached_servers controller:11211
+./conf.sh /etc/manila/manila.conf neutron auth_type password
+./conf.sh /etc/manila/manila.conf neutron project_domain_name Default
+./conf.sh /etc/manila/manila.conf neutron user_domain_name Default
+./conf.sh /etc/manila/manila.conf neutron region_name RegionOne
+./conf.sh /etc/manila/manila.conf neutron project_name service
+./conf.sh /etc/manila/manila.conf neutron username neutron
+./conf.sh /etc/manila/manila.conf neutron password password
+./conf.sh /etc/manila/manila.conf nova www_authenticate_uri http://controller:5000
+./conf.sh /etc/manila/manila.conf nova auth_url http://controller:5000
+./conf.sh /etc/manila/manila.conf nova memcached_servers controller:11211
+./conf.sh /etc/manila/manila.conf nova auth_type password
+./conf.sh /etc/manila/manila.conf nova project_domain_name Default
+./conf.sh /etc/manila/manila.conf nova user_domain_name Default
+./conf.sh /etc/manila/manila.conf nova region_name RegionOne
+./conf.sh /etc/manila/manila.conf nova project_name service
+./conf.sh /etc/manila/manila.conf nova username nova
+./conf.sh /etc/manila/manila.conf nova password password
+./conf.sh /etc/manila/manila.conf cinder www_authenticate_uri http://controller:5000
+./conf.sh /etc/manila/manila.conf cinder auth_url http://controller:5000
+./conf.sh /etc/manila/manila.conf cinder memcached_servers controller:11211
+./conf.sh /etc/manila/manila.conf cinder auth_type password
+./conf.sh /etc/manila/manila.conf cinder project_domain_name Default
+./conf.sh /etc/manila/manila.conf cinder user_domain_name Default
+./conf.sh /etc/manila/manila.conf cinder region_name RegionOne
+./conf.sh /etc/manila/manila.conf cinder project_name service
+./conf.sh /etc/manila/manila.conf cinder username cinder
+./conf.sh /etc/manila/manila.conf cinder password password
+./conf.sh /etc/manila/manila.conf generic share_backend_name GENERIC
+./conf.sh /etc/manila/manila.conf generic share_driver manila.share.drivers.generic.GenericShareDriver
+./conf.sh /etc/manila/manila.conf generic driver_handles_share_servers True
+./conf.sh /etc/manila/manila.conf generic service_instance_flavor_id 100
+./conf.sh /etc/manila/manila.conf generic service_image_name manila-service-image
+./conf.sh /etc/manila/manila.conf generic service_instance_user manila
+./conf.sh /etc/manila/manila.conf generic service_instance_password manila
+./conf.sh /etc/manila/manila.conf generic interface_driver manila.network.linux.interface.OVSInterfaceDriver
+
+for i in enable start;do systemctl $i openvswitch neutron-openvswitch-agent openstack-manila-share;done
+
+#-------------------
+# => controller node
+#-------------------
+
+# create default share type
+
+manila type-create default_share_type True
+
+###############
+## BOTH OPTIONS
+###############
+
+#-------------------
+# => controller node
+#-------------------
+
+# verification
+
+source ~/adminrc
+
+manila service-list
+
+# install manila dashbard packages
+
+yum -y install openstack-manila-ui
+
 #############################################################
 ########### END OF GUIDE. I HOPE YOU ENJOYED IT!! ###########
 #############################################################
 # This guide is a living document, so I will continue to
 # update it adding new features and such. Check back for more
 #############################################################
+
+
+
+
+
+
+
