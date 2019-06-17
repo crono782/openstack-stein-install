@@ -1,0 +1,22 @@
+# KVM host information for this tutorial
+
+CPU: 2X Intel Xeon X5670 @ 2.93GHz
+
+RAM: 40G
+
+DISK:
+~360G (RAID0) OS + VM OS disks
+~300G (RAID0) VM storage
+
+NETWORKS:
+2x 1G cards in 802.3ad bond
+3 routable VLAN interaces
+ - VLAN 1: management nework
+ - VLAN 2: tenant network
+ - vlan 3: provider network
+3 bridges for VM use
+ - br-mgmt: management
+ - br-tnt: tenant
+ - br-prv: provider
+1 internal bridge
+ - br-svc
