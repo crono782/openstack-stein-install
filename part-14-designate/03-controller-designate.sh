@@ -6,6 +6,12 @@
 # some verification
 openstack dns service list
 
+# install ui
+
+yum -y install openstack-designate-ui
+
+systemctl restart httpd
+
 # create a blacklist perhaps
 
 source ~/adminrc
