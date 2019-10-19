@@ -128,7 +128,7 @@ for i in enable start;do systemctl $i memcached;done
 
 yum -y install etcd
 
-sed -r -e '/(ETCD_LISTEN|ETCD_INITIAL)/ s/^#//' -e 's/localhost/10.10.10.51/g' -e '/(ETCD_NAME|ETCD_INITIAL)/ s/default/controller/' -e 's/(etcd-cluster)/\1-01/' /etc/etcd/etcd.conf
+sed -ri -e '/(ETCD_LISTEN|ETCD_INITIAL)/ s/^#//' -e 's/localhost/10.10.10.51/g' -e '/(ETCD_NAME|ETCD_INITIAL)/ s/default/controller/' -e 's/(etcd-cluster)/\1-01/' /etc/etcd/etcd.conf
 
 for i in enable start;do systemctl $i etcd;done
 
